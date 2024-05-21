@@ -303,7 +303,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  //char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -311,12 +311,16 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
+
+    *pte &= (~PTE_W);
+    *pte |= PTE_C;
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    // if((mem = kalloc()) == 0)
+    //   goto err;
+    // memmove(mem, (char*)pa, PGSIZE);
+    refcnt_inc((void*)pa);
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
+      //kfree(mem);
       goto err;
     }
   }
@@ -350,6 +354,11 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+    if(uncopied_cow(pagetable,va0))
+    {
+      if(cowalloc(pagetable,va0)<0)
+        return -1;
+    }
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
@@ -431,4 +440,52 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+int uncopied_cow(pagetable_t pgtbl, uint64 va)
+{
+  if(va >= MAXVA)
+    return 0;
+
+  pte_t* pte = walk(pgtbl,va,0);
+  if(pte == 0)
+    return 0;
+  if((*pte & PTE_V) == 0)
+    return 0;
+  if((*pte & PTE_U) == 0)
+    return 0;
+  
+  return ((*pte)&PTE_C);
+}
+
+
+int cowalloc(pagetable_t pgtbl, uint64 va)
+{
+  pte_t* pte = walk(pgtbl,va,0);
+  uint64 perm = PTE_FLAGS(*pte);
+  
+  if(pte == 0) return -1;
+  uint64 prev_sta = PTE2PA(*pte);
+
+  char* newpage = kalloc();
+
+  if(!newpage)
+  {
+    return -1;
+  }
+
+  uint64 va_sta = PGROUNDDOWN(va);
+  perm &= (~PTE_C);
+  perm |= PTE_W;
+
+  memmove(newpage,(char*)prev_sta,PGSIZE);
+  uvmunmap(pgtbl,va_sta,1,1);
+
+  if(mappages(pgtbl,va_sta,PGSIZE,(uint64)newpage,perm)<0)
+  {
+    kfree(newpage);
+    return -1;
+  }
+
+  return 0;
 }
