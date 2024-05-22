@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -100,6 +102,10 @@ walkaddr(pagetable_t pagetable, uint64 va)
   if(va >= MAXVA)
     return 0;
 
+  if(is_lazy_alloc(va) >= 0)
+  {
+    lazy_alloc(va);
+  }
   pte = walk(pagetable, va, 0);
   if(pte == 0)
     return 0;
@@ -181,9 +187,11 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+      continue;
+      //panic("uvmunmap: walk");
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      continue;
+      //panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -315,9 +323,11 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      continue;
+      //panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      continue;
+      //panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -440,3 +450,42 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+int lazy_alloc(uint64 va)
+{
+  struct proc *p = myproc();
+  uint64 page_sta = PGROUNDDOWN(va);
+  char *mem;
+
+  mem =kalloc();
+  if(mem == 0)
+  {
+    return -1;
+  }
+  memset(mem,0,PGSIZE);
+  if(mappages(p->pagetable, page_sta, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){
+    kfree(mem);
+    return -1;
+  }
+  return 0; 
+}
+
+int is_lazy_alloc(uint64 va)
+{
+  struct proc *p = myproc();
+  uint64 stval =  PGROUNDDOWN(va);
+  
+  if(stval >= p->sz)
+    return -1;
+  if(stval < PGROUNDDOWN(p->trapframe->sp) && va >=PGROUNDDOWN(p->trapframe->sp)-PGSIZE)
+    return -1;
+  pte_t* pte =walk(p->pagetable,va,0);
+
+  if(pte && (*pte & PTE_V))
+  {
+    return -1;
+  }
+
+  return 0;
+}
+
