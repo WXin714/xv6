@@ -23,32 +23,32 @@
 #include "fs.h"
 #include "buf.h"
 
+#define NBUCKET 13
+
+uint extern ticks;
+
 struct {
-  struct spinlock lock;
+  struct spinlock lock[NBUCKET];
   struct buf buf[NBUF];
 
   // Linked list of all buffers, through prev/next.
   // Sorted by how recently the buffer was used.
   // head.next is most recent, head.prev is least.
-  struct buf head;
+  struct buf head[NBUCKET];
 } bcache;
 
 void
 binit(void)
 {
   struct buf *b;
-
-  initlock(&bcache.lock, "bcache");
+  for(int i =0; i < NBUCKET; i++){
+  initlock(&bcache.lock[i], "bcache");}
 
   // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
-  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
+  bcache.head[0].next = &bcache.buf[0];
+  for(b = bcache.buf; b < bcache.buf+NBUF-1; b++){
+    b->next = b+1;
     initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
   }
 }
 
@@ -60,16 +60,20 @@ bget(uint dev, uint blockno)
 {
   struct buf *b;
 
-  acquire(&bcache.lock);
+  int id = hash(blockno);
+  acquire(&bcache.lock[id]);
 
   // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
+  b = bcache.head[id].next;
+  while(b){
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
-      release(&bcache.lock);
+      if(holding(&bcache.lock[id]))
+        release(&bcache.lock);
       acquiresleep(&b->lock);
       return b;
     }
+    b = b->next;
   }
 
   // Not cached.
@@ -121,16 +125,12 @@ brelse(struct buf *b)
 
   releasesleep(&b->lock);
 
-  acquire(&bcache.lock);
+  int id = hash(b->blockno);
+  acquire(&bcache.lock[id]);
   b->refcnt--;
   if (b->refcnt == 0) {
     // no one is waiting for it.
-    b->next->prev = b->prev;
-    b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    b->time = ticks;
   }
   
   release(&bcache.lock);
@@ -150,4 +150,7 @@ bunpin(struct buf *b) {
   release(&bcache.lock);
 }
 
-
+int hash (int n) {
+  int result = n % NBUCKET;
+  return result;
+}
